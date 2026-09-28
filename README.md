@@ -1,32 +1,6 @@
 # globalprotect-cpp
 
-C++20 reimplementation of the security-relevant functionality from
-`yuezk/GlobalProtect-openconnect`, with the bugs identified in the security
-audit (`/home/g/security-findings-globalprotect-openconnect.md`) fixed, and
-unit tests covering each fix.
-
-The original project's GUI/Tauri layer is intentionally **not** ported: this
-project provides the secure core (VPN certificate policy, browser-auth flow,
-service key handling, HTTP client, secret transport), the gateway API client,
-the tunnel security layer, and the end-to-end orchestration (`gpclient`) as a
-testable library plus a small end-to-end demo. A production port would link
-this library from the new client/service binaries and replace the C FFI shim's
-callback with a call into `gp::cert::evaluate_peer_cert`.
-
-## Findings → fixes
-
-| Finding | Severity | Fix in this codebase | Tests |
-|---|---|---|---|
-| **C-1** tunnel TLS validation unconditionally bypassed (`validate_peer_cert` returned 0 for every failure) | Critical | `gp::cert::evaluate_peer_cert()` + `OpenSslCertificateVerifier`: full chain validation (system store or explicit CA bundle) + hostname/IP check. Any failure **rejects** by default. Optional SHA-256 fingerprint pinning (`--pin-cert`). The old behavior is only reachable via the explicit `--ignore-tls-errors` switch, and even then the decision log records *why* validation failed. Broken/unreadable trust store fails closed. | `test_cert_policy` (11 cases: valid chain accepted; hostname mismatch, expired cert, untrusted CA, malformed DER all rejected by default; pin accept/reject; opt-in accept is logged; broken bundle fails closed) |
-| **H-1** callback listener: no auth, unbounded read, no timeout | High | `gp::auth::CallbackListener`: 256-bit per-session token in the URL path (constant-time compare, uniform 404 — no oracle); payload cap enforced *before* reading (413 on overflow); overall deadline; 0600 unique port file that does **not** contain the token; one-shot semantics. | `test_callback_listener` (attacker with port but no token gets 404 and the one-shot survives; oversized payload refused before read; timeout fires; one-shot consumed) |
-| **H-2** AuthServer: portal HTML served raw, LAN bind, panic on malformed redirect, no caps | High | `gp::auth::AuthServer`: only a locally generated template is served — every portal value passes `gp::html::escape_text`; redirect targets validated at startup (scheme allowlist http/https, no control chars/CRLF, no userinfo, optional host allowlist) — malformed input fails startup cleanly instead of hanging; non-loopback bind refused unless `--allow-remote-callback`; request cap + lifetime deadline; 256-bit token path. | `test_auth_server` (escaped page contains no raw `<script>`; 302 Location; `javascript:`/CRLF/file: redirects refused at start; allowlist enforced; wrong path → 404 without consuming one-shot; timeout; request cap) |
-| **H-3** secrets in argv / world-readable logs | High | `gp::secrets`: `spawn_with_stdin_secrets` (secrets travel over stdin, spawn is *refused* if a secret appears in argv); `write_secret_file` / `open_log_file_0600` (fchmod 0600 defeats umask, mode re-verified after write); `Redactor` for log lines. | `test_secret_transport` (argv scan; spawn refusal; stdin delivery verified via child `cat`; 0600 under umask 0; redaction never leaks raw payloads) |
-| **M-1** all-zero service API key in debug builds | Medium | `gp::service::ServiceKey`: always fresh CSPRNG (getrandom), all-zero output rejected, no compile-time constant exists. Operator-supplied key files must be 0600 unless `--allow-insecure-key-file`. | `test_service_key` (non-zero + unique; 0644 file refused by default / allowed with switch; wrong length and all-zero file refused) |
-| **M-2** HTTP clients without timeouts/size caps | Medium | `gp::http::HttpClient`: mandatory connect + total timeouts, response size cap enforced in the write callback (aborts transfer), protocol restricted to http/https, TLS verification on unless `--ignore-tls-errors`. | `test_http_client` (GET round-trip; 10 KiB body vs 1 KiB cap → aborted with "size cap"; slow server → total timeout fires early; POST body + Content-Type delivered) |
-| **M-3** incomplete log redaction | Medium | `Redactor` + the rule that payloads are never logged raw (see demo output: only byte counts). Covered by `test_secret_transport`. | — |
-| **L-1/L-2** FFI robustness / service exposure | Low | Addressed structurally: RAII ownership, no global static connection state, all network objects thread-confined with explicit lifetimes; the local service daemon (`gp::service::ServiceDaemon`) binds loopback-only by construction, writes `gpservice.lock` 0600 with post-write mode verification (default-umask creation is no longer possible), and caps concurrent connections + per-connection lifetime. | `test_service_daemon` (7 cases: lock file mode/content/removal; `/health`; WS upgrade + RFC 6455 accept key; sealed command round-trip with JSON escaping; tampered message → fail-closed EOF; oversized message → Close frame; missing upgrade headers → 400) |
-
-## Opt-in switches (all lenient behavior is OFF by default)
+# Opt-in switches (all lenient behavior is OFF by default)
 
 | Switch | Effect | Default |
 |---|---|---|
