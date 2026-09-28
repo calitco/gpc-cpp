@@ -1,6 +1,6 @@
-# globalprotect-cpp
+# gpc-cpp
 
-# Opt-in switches (all lenient behavior is OFF by default)
+## Opt-in switches (all lenient behavior is OFF by default)
 
 | Switch | Effect | Default |
 |---|---|---|
